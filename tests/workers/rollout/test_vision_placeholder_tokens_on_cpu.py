@@ -30,7 +30,8 @@ import torch
 pytest.importorskip("vllm")
 
 from verl.workers.rollout.utils import get_vision_placeholder_token_ids
-from verl.workers.rollout.vllm_rollout.utils import monkey_patch_compute_logits
+from verl.workers.rollout.vllm_rollout import utils as vllm_rollout_utils
+from verl.workers.rollout.vllm_rollout.utils import monkey_patch_compute_logits, vLLMColocateWorkerExtension
 
 TOKENS = {151655: "<|image_pad|>", 151656: "<|video_pad|>"}
 
@@ -107,3 +108,47 @@ class TestMonkeyPatchComputeLogits:
         logits = model.compute_logits()
 
         assert torch.equal(logits[:, :VOCAB_SIZE], UNMASKED)
+
+
+class TestMonkeyPatchModel:
+    def test_pooling_model_skips_generation_patches(self, monkeypatch):
+        pooling_model = object()
+        worker = object.__new__(vLLMColocateWorkerExtension)
+        monkeypatch.setattr(worker, "_iter_all_models", lambda: iter([pooling_model]))
+        monkeypatch.setattr(
+            vllm_rollout_utils,
+            "monkey_patch_compute_logits",
+            lambda *_args, **_kwargs: pytest.fail("pooling model must not patch compute_logits"),
+        )
+        monkeypatch.setattr(
+            vllm_rollout_utils,
+            "patch_vllm_moe_model_weight_loader",
+            lambda *_args, **_kwargs: pytest.fail("pooling model must not patch the MoE weight loader"),
+        )
+
+        worker.monkey_patch_model(VOCAB_SIZE)
+
+    def test_generation_model_keeps_both_patches(self, monkeypatch):
+        model = FakeModel()
+        worker = object.__new__(vLLMColocateWorkerExtension)
+        monkeypatch.setattr(worker, "_iter_all_models", lambda: iter([model]))
+        calls = []
+        monkeypatch.setattr(
+            vllm_rollout_utils,
+            "monkey_patch_compute_logits",
+            lambda patched_model, vocab_size, banned_token_ids: calls.append(
+                ("compute_logits", patched_model, vocab_size, banned_token_ids)
+            ),
+        )
+        monkeypatch.setattr(
+            vllm_rollout_utils,
+            "patch_vllm_moe_model_weight_loader",
+            lambda patched_model: calls.append(("weight_loader", patched_model)),
+        )
+
+        worker.monkey_patch_model(VOCAB_SIZE, banned_token_ids=[2, 4])
+
+        assert calls == [
+            ("compute_logits", model, VOCAB_SIZE, [2, 4]),
+            ("weight_loader", model),
+        ]

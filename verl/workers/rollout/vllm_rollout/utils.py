@@ -233,6 +233,10 @@ class vLLMColocateWorkerExtension:
 
     def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
         for model in self._iter_all_models():
+            # Pooling models do not expose generation logits and do not need
+            # the generation-specific weight-loader patch below.
+            if not hasattr(model, "compute_logits"):
+                continue
             # patch compute_logits to avoid sampling OOV and other illegal tokens
             monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
             # patch weight loader to support MoE model
